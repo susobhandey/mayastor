@@ -19,6 +19,7 @@ pub use descriptor::{DescriptorGuard, UntypedDescriptorGuard};
 pub use device_events::{
     DeviceEventDispatcher, DeviceEventListener, DeviceEventSink, DeviceEventType,
 };
+pub use device_health::{DeviceHealth, DeviceIdentity, SmartAttribute};
 pub use device_monitor::{device_cmd_queue, device_monitor_loop, DeviceCommand};
 pub use env::{
     mayastor_env_stop, MayastorCliArgs, MayastorEnvironment, NvmeCliArgs, PoolCliArgs, GLOBAL_RC,
@@ -55,6 +56,7 @@ mod bdev;
 mod block_device;
 mod descriptor;
 mod device_events;
+pub(crate) mod device_health;
 mod device_monitor;
 pub mod diagnostics;
 mod env;

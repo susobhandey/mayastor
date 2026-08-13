@@ -243,6 +243,19 @@ impl<T: BdevOps> BdevHandle<T> {
         self.nvme_admin(&cmd, Some(buffer)).await
     }
 
+    /// read the SMART / Health Information log page (Log Page Identifier 02h)
+    /// buffer must be at least 512B
+    pub async fn nvme_get_smart(&self, buffer: &mut DmaBuf) -> Result<(), CoreError> {
+        let mut cmd = spdk_nvme_cmd::default();
+        cmd.set_opc(nvme_admin_opc::GET_LOG_PAGE.into());
+        cmd.nsid = 0xffffffff;
+        // cdw10: bits 7:0 = Log Page Identifier (02h = SMART/Health), bits
+        // 27:16 = NUMDL (number of dwords to return, minus one). The page is
+        // 512 bytes == 128 dwords, so NUMDL = 127.
+        unsafe { *spdk_rs::libspdk::nvme_cmd_cdw10_get(&mut cmd) = (127u32 << 16) | 0x02 };
+        self.nvme_admin(&cmd, Some(buffer)).await
+    }
+
     /// sends an NVMe Admin command, only for read commands without buffer
     pub async fn nvme_admin_custom(&self, opcode: u8) -> Result<(), CoreError> {
         let mut cmd = spdk_nvme_cmd::default();

@@ -24,9 +24,9 @@ use spdk_rs::{
 use crate::core::{
     mempool::MemoryPool, Bdev, BdevHandle, BlockDevice, BlockDeviceDescriptor, BlockDeviceHandle,
     BlockDeviceIoStats, CoreError, DeviceEventDispatcher, DeviceEventSink, DeviceEventType,
-    DeviceIoController, IoCompletionCallback, IoCompletionCallbackArg, IoCompletionStatus,
-    NvmeStatus, ReadOptions, SnapshotParams, ToErrno, UntypedBdev, UntypedBdevHandle,
-    UntypedDescriptorGuard,
+    DeviceHealth, DeviceIoController, IoCompletionCallback, IoCompletionCallbackArg,
+    IoCompletionStatus, NvmeStatus, ReadOptions, SnapshotParams, ToErrno, UntypedBdev,
+    UntypedBdevHandle, UntypedDescriptorGuard,
 };
 
 #[cfg(feature = "fault-injection")]
@@ -131,6 +131,67 @@ impl BlockDevice for SpdkBlockDevice {
         let disp = map.entry(self.device_name()).or_default();
         disp.add_listener(listener);
         Ok(())
+    }
+
+    async fn device_health(&self) -> Result<DeviceHealth, CoreError> {
+        let driver = self.driver_name();
+        let name = self.device_name();
+
+        // Kernel-backed disks (aio/uring) — SAS, SATA and NVMe used without
+        // VFIO — have a /dev node, read generically with smartctl.
+        if (driver == "aio" || driver == "uring") && name.starts_with("/dev/") {
+            return crate::core::device_health::read_device_health(&name);
+        }
+
+        // VFIO-bound NVMe (pcie:// -> SPDK nvme bdev) has no /dev node; read the
+        // SMART/Health log page via the existing bdev NVMe admin passthru path.
+        if driver == "nvme" {
+            let hdl = UntypedBdevHandle::open_with_bdev(&self.0, false)?;
+            let mut buf = DmaBuf::new(512, self.alignment())
+                .map_err(|_| CoreError::DmaAllocationFailed { size: 512 })?;
+            hdl.nvme_get_smart(&mut buf).await?;
+            let mut health =
+                DeviceHealth::from_nvme_smart(buf.as_slice()).ok_or(CoreError::NotSupported {
+                    source: Errno::ENXIO,
+                })?;
+
+            // Identity is static for the device's lifetime, unlike the health
+            // counters above -- fetch the Identify Controller admin command
+            // only once per device and reuse it on every subsequent poll.
+            health.identity = match crate::core::device_health::cached_nvme_identity(&name) {
+                Some(identity) => Some(identity),
+                None => {
+                    let mut ident_buf = DmaBuf::new(4096, self.alignment())
+                        .map_err(|_| CoreError::DmaAllocationFailed { size: 4096 })?;
+                    let identity = hdl
+                        .nvme_identify_ctrlr(&mut ident_buf)
+                        .await
+                        .ok()
+                        .and_then(|_| {
+                            crate::core::device_health::identity_from_nvme_identify(
+                                ident_buf.as_slice(),
+                            )
+                        })
+                        .map(|mut identity| {
+                            // Capacity/sector size are already known generically
+                            // for any bdev -- no need for a namespace Identify.
+                            identity.capacity_bytes = Some(self.size_in_bytes());
+                            identity.logical_sector_size = Some(self.block_len() as u32);
+                            identity
+                        });
+                    if let Some(identity) = identity.clone() {
+                        crate::core::device_health::cache_nvme_identity(&name, identity);
+                    }
+                    identity
+                }
+            };
+
+            return Ok(health);
+        }
+
+        Err(CoreError::NotSupported {
+            source: Errno::ENXIO,
+        })
     }
 }
 
